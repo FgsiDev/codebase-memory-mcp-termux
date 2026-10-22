@@ -67,6 +67,11 @@ jobs:
           ndk-version: r27c
           add-to-path: false
 
+      - name: Patch asm for ARM32 (@progbits -> %progbits)
+        # Di ARM 32-bit '@' adalah awal komentar, jadi '@progbits' ditolak assembler.
+        if: ${{ matrix.name == 'arm' }}
+        run: sed -i 's/@progbits/%progbits/g' vendored/nomic/code_vectors_blob.S
+
       - name: Build (${{ matrix.name }}, API 28)
         env:
           NDK: ${{ steps.ndk.outputs.ndk-path }}
