@@ -61,6 +61,17 @@ jobs:
           repository: DeusData/codebase-memory-mcp
           ref: ${{ needs.prepare.outputs.sha }}
 
+      # Repo ini sendiri (hanya android-port.py), ke subfolder supaya tidak
+      # bentrok dengan source upstream di root.
+      - uses: actions/checkout@v4
+        with:
+          path: port
+          sparse-checkout: android-port.py
+          sparse-checkout-cone-mode: false
+
+      - name: Patch upstream for Android (dir walk + TMPDIR)
+        run: python3 port/android-port.py .
+
       - uses: nttld/setup-ndk@v1
         id: ndk
         with:
