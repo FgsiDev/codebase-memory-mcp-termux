@@ -5,6 +5,8 @@ name: Build codebase-memory-mcp (Termux arm64)
 # pakai Android NDK (bionic), lalu rilis ke repo ini.
 
 on:
+  push:
+    branches: [ "main" ]
   workflow_dispatch:
     inputs:
       ref:
