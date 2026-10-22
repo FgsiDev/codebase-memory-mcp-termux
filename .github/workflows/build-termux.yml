@@ -1,13 +1,15 @@
-name: Build codebase-memory-mcp (Termux arm64)
+name: Build codebase-memory-mcp (Termux all arch)
 
-# Taruh di repo kamu sendiri: .github/workflows/build-termux.yml
-# Meng-checkout source upstream (DeusData/codebase-memory-mcp), cross-compile
-# pakai Android NDK (bionic), lalu rilis ke repo ini.
+# Taruh di repo kamu: .github/workflows/build-termux.yml
+# Checkout source upstream (DeusData/codebase-memory-mcp), cross-compile pakai
+# Android NDK (bionic) untuk arm64, arm, x86_64, x86, lalu rilis ke repo ini.
 
 on:
   push:
     branches: [ "main" ]
-    
+    paths-ignore:
+      - "**.md"
+      - "install-termux.sh"
   workflow_dispatch:
     inputs:
       ref:
@@ -22,14 +24,42 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  prepare:
     runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.v.outputs.sha }}
+      ver: ${{ steps.v.outputs.ver }}
     steps:
       - uses: actions/checkout@v4
         with:
           repository: DeusData/codebase-memory-mcp
-          ref: ${{ inputs.ref }}
+          ref: ${{ inputs.ref || 'main' }}
           fetch-depth: 0
+      - id: v
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          VER="$(git describe --tags --match 'v[0-9]*' --always | sed 's/^v//; s#/#-#g')"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    # Leg 32-bit boleh gagal tanpa menggagalkan rilis arch lain.
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: arm64,  triple: aarch64-linux-android,    experimental: false }
+          - { name: x86_64, triple: x86_64-linux-android,     experimental: false }
+          - { name: arm,    triple: armv7a-linux-androideabi, experimental: true }
+          - { name: x86,    triple: i686-linux-android,       experimental: true }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: DeusData/codebase-memory-mcp
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - uses: nttld/setup-ndk@v1
         id: ndk
@@ -37,27 +67,26 @@ jobs:
           ndk-version: r27c
           add-to-path: false
 
-      - name: Build (Android arm64, API 28)
+      - name: Build (${{ matrix.name }}, API 28)
         env:
           NDK: ${{ steps.ndk.outputs.ndk-path }}
+          TRIPLE: ${{ matrix.triple }}
+          VER: ${{ needs.prepare.outputs.ver }}
         run: |
           set -euo pipefail
           BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
           # API 28: posix_spawn* baru dideklarasikan di bionic mulai API 28
-          CC="$BIN/aarch64-linux-android28-clang"
-          CXX="$BIN/aarch64-linux-android28-clang++"
-          VER="$(git describe --tags --always | sed 's/^v//')"
-          echo "VER=$VER" >> "$GITHUB_ENV"
+          CC="$BIN/${TRIPLE}28-clang"
+          CXX="$BIN/${TRIPLE}28-clang++"
 
-          # Catatan override:
-          # - LDFLAGS diganti penuh: bionic tidak punya -lpthread/-lstdc++ asli,
-          #   libc++ di-link statis.
-          # - mimalloc global override dimatikan (sama seperti build macOS upstream).
+          # - LDFLAGS diganti penuh: bionic tanpa -lpthread/-lstdc++, libc++ statis.
+          # - mimalloc global override dimatikan.
           # - -Wno-error: -Werror upstream bisa gagal di warning khusus bionic.
+          # - _FILE_OFFSET_BITS=64: off_t 64-bit di target 32-bit.
           make -j"$(nproc)" -f Makefile.cbm cbm \
             CC="$CC" CXX="$CXX" \
             MIMALLOC_OVERRIDE_DEFINE= GLOBAL_OVERRIDE_DEFINE= \
-            CFLAGS_EXTRA="-Wno-error -DCBM_VERSION=\"\\\"$VER\\\"\"" \
+            CFLAGS_EXTRA="-Wno-error -D_FILE_OFFSET_BITS=64 -DCBM_VERSION=\"\\\"$VER\\\"\"" \
             LDFLAGS="-lm -lc++_static -lc++abi -lz -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now"
 
           "$BIN/llvm-strip" build/c/codebase-memory-mcp
@@ -68,7 +97,7 @@ jobs:
       - name: Package
         run: |
           set -euo pipefail
-          NAME="codebase-memory-mcp-termux-arm64"
+          NAME="codebase-memory-mcp-termux-${{ matrix.name }}"
           mkdir -p dist
           tar -czf "dist/$NAME.tar.gz" -C build/c codebase-memory-mcp
           (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
@@ -76,13 +105,34 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: codebase-memory-mcp-termux-arm64
+          name: codebase-memory-mcp-termux-${{ matrix.name }}
           path: dist/*
 
-      - name: Release
-        if: ${{ inputs.release }}
-        uses: softprops/action-gh-release@v2
+  release:
+    needs: [prepare, build]
+    if: ${{ github.event_name == 'push' || inputs.release }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
         with:
-          tag_name: termux-${{ env.VER }}
-          name: codebase-memory-mcp ${{ env.VER }} (Termux arm64)
-          files: dist/*
+          pattern: codebase-memory-mcp-termux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ needs.prepare.outputs.ver }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          ls -lh dist
+          TAG="termux-${VER}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" dist/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "codebase-memory-mcp ${VER} (Termux)" \
+              --notes "Build Termux dari DeusData/codebase-memory-mcp @ ${SHA:0:12}. Install: curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install-termux.sh | bash"
+          fi
