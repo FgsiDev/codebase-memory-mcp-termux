@@ -7,6 +7,7 @@ name: Build codebase-memory-mcp (Termux arm64)
 on:
   push:
     branches: [ "main" ]
+    
   workflow_dispatch:
     inputs:
       ref:
@@ -36,14 +37,15 @@ jobs:
           ndk-version: r27c
           add-to-path: false
 
-      - name: Build (Android arm64, API 24)
+      - name: Build (Android arm64, API 28)
         env:
           NDK: ${{ steps.ndk.outputs.ndk-path }}
         run: |
           set -euo pipefail
           BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          CC="$BIN/aarch64-linux-android24-clang"
-          CXX="$BIN/aarch64-linux-android24-clang++"
+          # API 28: posix_spawn* baru dideklarasikan di bionic mulai API 28
+          CC="$BIN/aarch64-linux-android28-clang"
+          CXX="$BIN/aarch64-linux-android28-clang++"
           VER="$(git describe --tags --always | sed 's/^v//')"
           echo "VER=$VER" >> "$GITHUB_ENV"
 
