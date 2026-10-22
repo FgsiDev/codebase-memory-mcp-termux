@@ -1,0 +1,84 @@
+name: Build codebase-memory-mcp (Termux arm64)
+
+# Taruh di repo kamu sendiri: .github/workflows/build-termux.yml
+# Meng-checkout source upstream (DeusData/codebase-memory-mcp), cross-compile
+# pakai Android NDK (bionic), lalu rilis ke repo ini.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Upstream tag/branch/sha"
+        default: "main"
+      release:
+        description: "Publish GitHub Release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: DeusData/codebase-memory-mcp
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - name: Build (Android arm64, API 24)
+        env:
+          NDK: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CC="$BIN/aarch64-linux-android24-clang"
+          CXX="$BIN/aarch64-linux-android24-clang++"
+          VER="$(git describe --tags --always | sed 's/^v//')"
+          echo "VER=$VER" >> "$GITHUB_ENV"
+
+          # Catatan override:
+          # - LDFLAGS diganti penuh: bionic tidak punya -lpthread/-lstdc++ asli,
+          #   libc++ di-link statis.
+          # - mimalloc global override dimatikan (sama seperti build macOS upstream).
+          # - -Wno-error: -Werror upstream bisa gagal di warning khusus bionic.
+          make -j"$(nproc)" -f Makefile.cbm cbm \
+            CC="$CC" CXX="$CXX" \
+            MIMALLOC_OVERRIDE_DEFINE= GLOBAL_OVERRIDE_DEFINE= \
+            CFLAGS_EXTRA="-Wno-error -DCBM_VERSION=\"\\\"$VER\\\"\"" \
+            LDFLAGS="-lm -lc++_static -lc++abi -lz -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now"
+
+          "$BIN/llvm-strip" build/c/codebase-memory-mcp
+          file build/c/codebase-memory-mcp
+          "$BIN/llvm-readelf" -d build/c/codebase-memory-mcp | grep NEEDED || true
+          ls -lh build/c/codebase-memory-mcp
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          NAME="codebase-memory-mcp-termux-arm64"
+          mkdir -p dist
+          tar -czf "dist/$NAME.tar.gz" -C build/c codebase-memory-mcp
+          (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: codebase-memory-mcp-termux-arm64
+          path: dist/*
+
+      - name: Release
+        if: ${{ inputs.release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: termux-${{ env.VER }}
+          name: codebase-memory-mcp ${{ env.VER }} (Termux arm64)
+          files: dist/*
