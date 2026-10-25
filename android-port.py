@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Patch codebase-memory-mcp so it runs inside Android/Termux.
 
-Android app processes cannot open '/' or /data/data, and /data/data is owned
-by uid 1000 (not root), so upstream's fd-based "walk every ancestor from /"
-directory logic fails. On __ANDROID__ we create directories with plain mkdir()
-and open the target directory directly. Also, /tmp does not exist in Termux,
-so the daemon runtime dir defaults to $TMPDIR.
+1. Android app processes cannot open '/' or /data/data, and /data/data is
+   owned by uid 1000 (not root), so upstream's fd-based "walk every ancestor
+   from /" directory logic fails. On __ANDROID__ we create directories with
+   plain mkdir() and open the target directory directly. /tmp does not exist
+   in Termux either, so the runtime dir defaults to $TMPDIR.
+2. Android's SELinux policy forbids hard links for apps (linkat -> EACCES),
+   and the upstream daemon's socket protocol is built on hard links. So on
+   __ANDROID__ the daemon is bypassed: the MCP server (stdio) and one-shot
+   `cli` commands run in-process, and hook clients are a fail-open no-op.
+   `install` (agent auto-config) also relies on link() and is unsupported;
+   register the MCP server manually.
 
 Usage: android-port.py <upstream-checkout-dir>
 Exits non-zero if any anchor is missing, so upstream drift fails loudly.
@@ -158,4 +164,93 @@ patch(
         char *component = cursor;
 ''',
 )
+
+# 4. main.c: bypass the daemon on Android (hard links are blocked by SELinux)
+patch(
+    "src/main.c",
+    r'''static char *main_local_cli_daemon_execute(const char *tool_name, const char *args_json,
+                                           bool quiet_requested) {
+    cbm_daemon_ipc_endpoint_t *endpoint = main_daemon_endpoint_new();
+''',
+    r'''static char *main_local_cli_daemon_execute(const char *tool_name, const char *args_json,
+                                           bool quiet_requested) {
+#ifdef __ANDROID__
+    /* No daemon on Android: run the tool in an in-process server. */
+    (void)quiet_requested;
+    {
+        cbm_mcp_server_t *android_srv = cbm_mcp_server_new(NULL);
+        if (!android_srv) {
+            (void)fprintf(stderr, "error: failed to create local server\n");
+            return NULL;
+        }
+        cbm_mcp_server_set_background_tasks(android_srv, false);
+        char android_root[MAIN_PATH_CAP];
+        char android_allowed[MAIN_PATH_CAP];
+        const char *android_allowed_ptr = NULL;
+        if (main_session_context(NULL, android_root, android_allowed, &android_allowed_ptr)) {
+            (void)cbm_mcp_server_set_session_context(android_srv, android_root,
+                                                     android_allowed_ptr);
+        }
+        char *android_result = cbm_mcp_handle_tool(android_srv, tool_name, args_json);
+        cbm_mcp_server_free(android_srv);
+        return android_result;
+    }
+#endif
+    cbm_daemon_ipc_endpoint_t *endpoint = main_daemon_endpoint_new();
+''',
+)
+patch(
+    "src/main.c",
+    r'''    if (role == CBM_DAEMON_PROCESS_LOCAL_CLI) {
+        bool feedback_enabled = main_local_cli_feedback_enabled(argc, argv);
+''',
+    r'''#ifdef __ANDROID__
+    if (role == CBM_DAEMON_PROCESS_LOCAL_CLI) {
+        /* No daemon / coordination locks on Android (they need hard links). */
+        int android_cli_result = handle_subcommand(argc, argv, NULL, NULL);
+        return android_cli_result >= 0 ? android_cli_result : EXIT_FAILURE;
+    }
+#endif
+    if (role == CBM_DAEMON_PROCESS_LOCAL_CLI) {
+        bool feedback_enabled = main_local_cli_feedback_enabled(argc, argv);
+''',
+)
+patch(
+    "src/main.c",
+    r'''    const char *hook_event = NULL;
+    const char *hook_dialect = NULL;
+    if (role == CBM_DAEMON_PROCESS_HOOK_CLIENT &&
+''',
+    r'''#ifdef __ANDROID__
+    if (role == CBM_DAEMON_PROCESS_HOOK_CLIENT) {
+        return EXIT_SUCCESS; /* hooks are fail-open; augmentation needs the daemon */
+    }
+    if (role == CBM_DAEMON_PROCESS_MCP_CLIENT) {
+        /* Stdio MCP server fully in-process: the daemon protocol needs hard
+         * links, which Android's SELinux policy denies to apps. */
+        cbm_mcp_server_t *android_mcp = cbm_mcp_server_new(NULL);
+        if (!android_mcp) {
+            (void)fprintf(stderr, "codebase-memory-mcp: failed to create MCP server\n");
+            return EXIT_FAILURE;
+        }
+        cbm_mcp_server_set_tool_profile(android_mcp, tool_profile);
+        char android_root[MAIN_PATH_CAP];
+        char android_allowed[MAIN_PATH_CAP];
+        const char *android_allowed_ptr = NULL;
+        if (main_session_context(NULL, android_root, android_allowed, &android_allowed_ptr)) {
+            (void)cbm_mcp_server_set_session_context(android_mcp, android_root,
+                                                     android_allowed_ptr);
+        }
+        setup_signal_handlers();
+        int android_rc = cbm_mcp_server_run(android_mcp, stdin, stdout);
+        cbm_mcp_server_free(android_mcp);
+        return android_rc < 0 ? EXIT_FAILURE : EXIT_SUCCESS;
+    }
+#endif
+    const char *hook_event = NULL;
+    const char *hook_dialect = NULL;
+    if (role == CBM_DAEMON_PROCESS_HOOK_CLIENT &&
+''',
+)
+
 print("android-port: all patches applied")

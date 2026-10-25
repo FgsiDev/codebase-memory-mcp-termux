@@ -88,6 +88,22 @@ scripts/build.sh
 # hasil: build/c/codebase-memory-mcp
 ```
 
+## Perbedaan dari upstream (penting)
+
+Build ini diberi patch (`android-port.py`) supaya jalan di Android:
+
+- **Tanpa daemon.** Upstream memakai daemon bersama yang protokolnya berbasis *hard link*, sedangkan SELinux Android melarang hard link untuk app (`EACCES`). Di sini server MCP (stdio) dan perintah `cli` berjalan langsung di dalam proses.
+- **`install` tidak didukung.** Auto-konfigurasi agent juga memakai hard link. Daftarkan MCP server secara manual (lihat di atas).
+- **Hook agent = no-op.** Augmentasi hook butuh daemon, jadi di Android dilewati (fail-open).
+- **Auto-sync watcher / UI bersama tidak aktif** karena itu dikelola daemon. Re-index manual dengan `index_repository`.
+- Pembuatan folder cache memakai `mkdir()` biasa dan folder runtime memakai `$TMPDIR`, karena Android melarang membuka `/` dan `/tmp` tidak ada di Termux.
+
+Daftarkan ke Claude Code (contoh):
+
+```bash
+claude mcp add codebase-memory-mcp -- "$HOME/.local/bin/codebase-memory-mcp"
+```
+
 ## Catatan teknis
 
 - Dilink dengan libc++ statis, jadi tidak butuh `libc++_shared.so`.
@@ -102,6 +118,8 @@ scripts/build.sh
 | `codebase-memory-mcp: command not found` | Tambahkan `~/.local/bin` ke `PATH` |
 | Gagal di Android < 9 | Build butuh API 28; gunakan build native di Termux (lihat di atas) |
 | Asset 32-bit tidak ada di release | Build eksperimental gagal; cek log Actions |
+| `install -y` gagal | Memang tidak didukung di Android; daftarkan MCP secara manual |
+| `CBM daemon failed to start` | Kamu memakai build lama tanpa patch; pasang ulang dari release terbaru |
 
 ## Lisensi
 
