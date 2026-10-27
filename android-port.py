@@ -253,4 +253,22 @@ patch(
 ''',
 )
 
+# 5. compat.h: temp dir. Termux has no /tmp; use $TMPDIR ($PREFIX/tmp).
+patch(
+    "src/foundation/compat.h",
+    r'''#else
+    return "/tmp";
+#endif
+}
+''',
+    r'''#elif defined(__ANDROID__)
+    const char *android_tmp = getenv("TMPDIR");
+    return (android_tmp && android_tmp[0]) ? android_tmp : "/data/data/com.termux/files/usr/tmp";
+#else
+    return "/tmp";
+#endif
+}
+''',
+)
+
 print("android-port: all patches applied")
